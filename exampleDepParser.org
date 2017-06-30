@@ -1,0 +1,579 @@
+#+TITLE: Dependency Parser in Haskell
+
+
+* Imports
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+import Control.Monad
+import Data.String
+#+END_SRC
+
+
+* Introduction
+
+Here, we demonstrate the building of a dependency parser structure using
+Haskell. This is an implementation of the parser engine shown in [[http://ltrc.iiit.ac.in/icon2016/proceedings/icon2016/pdf/W16-6310.pdf][this paper]]
+by Tomasz Obrebski.
+
+The parser is structured into two parts- a language-agnostic parser core, where
+minimal assumptions are made about structural properties of the syntactic trees
+allowed and the nature of grammatical constraints. The parser engine takes a
+lexicon and a grammar - represented using structures native to Haskell - and
+outputs a dependency structure.
+
+
+* Example Latin Lexicon And Grammar
+  
+The parser takes a =lexicon= and =grammar= as input.
+
+** Lexicon
+
+The lexicon for a small subset of Latin sentences is defined below.
+
+The lexicon consists of :
+
+  - Nouns :: Joannes, Mariam
+  - Verbs :: Amat
+
+#+BEGIN_SRC haskell 
+
+data Category = Nn | Na | V deriving (Eq, Ord)
+
+data Role = Subj | Cmpl deriving (Eq, Ord)
+
+instance Show Role where
+  show Subj = "Subj"
+  show Cmpl = "Cmpl"
+
+instance Show Category where
+  show Nn = "Nn"
+  show Na = "Na"
+  show V  = "V"
+
+dic "Joannes" = [Nn]
+dic "Mariam"  = [Na]
+dic "Amat"    = [V]
+
+#+END_SRC
+
+** Grammar
+
+Here, we build a simple, minimal grammar. The grammar consists of three
+head-dependent links:
+
+  - a =Verb= is head of =Noun-Nominative= and
+=Noun-Accusative=
+  - Any other syntactic relationships - such as =Nn -> Na= - do not form an arc
+    in the tree
+
+Here, we make no assumptions about the presence or absence of head-uniqueness
+in the grammer. Therefore, it is possible for a dependent to have multiple
+heads. (Of course, the grammar presented above does not allow for this
+possibility, but nevertheless that is a feature of the grammar and not the
+parser engine)
+
+#+BEGIN_SRC haskell 
+
+-- to connect a dependent to its heads
+heads d = [ (r, h) | h <- preds d,
+                     r <- link (getCategory h) (getCategory d)]
+
+
+-- to connect a head to its dependents
+deps h = [ (r, d) | d <- preds h,
+                    r <- link (getCategory h) (getCategory d)]       
+
+-- to show the role of an arc
+link V Nn = [Subj]
+link V Na = [Cmpl]
+link _ _  = []
+
+pass = const True
+#+END_SRC
+
+
+* Example English Lexicon and Grammar
+
+The author of the paper gives examples of lexicons featuring small subsets of
+Latin and Polish. Here, we build a lexicon featuring a small subset of English,
+talking about people and cats.
+
+** Lexicon
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+
+data Category = Nn | Na | V | Dt  deriving (Eq, Ord)
+
+data Role = Subj | Cmpl | Det deriving (Eq, Ord)
+
+instance Show Role where
+  show Subj = "Subj"
+  show Cmpl = "Cmpl"
+  show Det  = "Det"
+
+instance Show Category where
+  show Nn = "Nn"
+  show Na = "Na"
+  show V  = "V"
+  show Dt = "Dt"
+
+
+-- nominative nouns
+dic "I" = [Nn]
+dic "You" = [Nn]
+dic "We" = [Nn]
+dic "She" = [Nn]
+dic "He" = [Nn]
+dic "They" = [Nn]
+
+-- accusative nouns
+dic "cat" = [Na]
+dic "cats" = [Na]
+
+-- determiners
+dic "a" = [Dt]
+dic "the" = [Dt]
+
+-- verbs
+dic "owns" = [V]
+dic "own" = [V]
+dic "fed" = [V]
+dic "feed" = [V]
+
+-- links
+link V Nn = [Subj]
+link V Na = [Cmpl]
+link Na Dt = [Det]
+link _ _ = []
+
+#+END_SRC
+** Grammar
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+
+-- to connect a dependent to its heads
+heads d = [ (r, h) | h <- preds d,
+                     r <- link (getCategory h) (getCategory d)]
+
+
+-- to connect a head to its dependents
+deps h = [ (r, d) | d <- preds h,
+                    r <- link (getCategory h) (getCategory d)]       
+
+
+pass = const True
+#+END_SRC
+
+
+* Family of Closure Functions 
+  
+Defining the family of closure functions that will be used in the parser.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+clo, mclo, rclo, mrclo :: (a -> [a]) -> a -> [a]
+clo f = f >=> (pure `mappend` clo f)
+rclo f = pure `mappend` clo f
+mclo f = f >=> mrclo f
+mrclo f x = let
+              fx = f x in
+                 if null fx
+                 then pure x
+                 else fx >>= mrclo f
+
+#+END_SRC
+
+
+* Data Structures
+
+The parser core is based on the following data types:
+
+  - =Parse= :: 
+     A (partial/full) parse is represented as a sequence of parse
+    steps. Each step consumes one word and introduces a new node to the parse.
+
+  - =Step= :: 
+     A parse is a sequence (represented as a =List=) of parse steps. A
+    step is a type representing an action - it takes in a word and adds a node
+    to the tree. Therefore, a =Step= type takes the following arguments:
+
+    + =index= : the index of the word (i.e: it's position within a sentence)
+    + =category= : the syntactic category of the node (word)
+    + =headArc= : the arc linking the node to its left head. This arc is
+      present only if the node is preceded by its head in the surface ordering.
+    + =depArcs= : the list of arcs connecting the node with its left dependents 
+
+It is noted that the presence of both a left-head arc and left-dependents
+ensure that each word in a sentence is connected to the tree.
+
+  - =Node= :: 
+     A node of the tree. Contains the entire parse from the node's
+    perspective - for a node ~i~, =history= contains all the steps from ~1~ to
+    ~i~, and =future= contains all the steps from ~i+1~ to the last step.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+type Index = Int
+
+type Arc = (Role, Index)
+
+data Step = Step {
+                 index :: Index,
+                 category :: Category,
+                 headArc :: [Arc],
+                 depArcs :: [Arc]
+                 } deriving (Eq, Ord, Show)
+
+
+type Parse = [Step]
+
+data Node = Node {
+                 history :: [Step],
+                 future :: [Step]
+                 } deriving (Eq, Ord)
+
+
+#+END_SRC
+
+
+
+* Basic Operators For Constructing a Parse
+
+We introduce three basic operators for constructing a parse:
+
+  - (<<) :: Adds an unconnected node with index =i= and category =c= to the
+            parse =p=
+  - (+->) :: adds the current node as dependent of the node =i=, with role =r=
+  - (+<-) :: adds the current node as head of the node =i=, with role =r=
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+infixl 4 <<, +->, +<-
+  
+(<<) :: Parse -> (Index, Category) -> Parse
+p << (i, c) = Step i c [] [] : p
+
+(+->),(+<-) :: Parse -> (Role, Index) -> Parse
+(Step i c [] d:p) +-> (r, j) = Step i c [(r, j)] d:p
+(Step i c h d:p)  +<- (r, j) = Step i c h ((r,j) : d) : p
+
+
+#+END_SRC
+
+
+* Extracting Information From Node
+
+Each node contains the full information about the parse. Given this,
+information often needs to be extracted from a Node, such as index/category of
+word, predecessor or successor nodes, etc. Here, we define some helper
+functions to extract information from a Node.
+
+
+** Extracting Word Information From Node
+
+To extract the index of a word from a node :
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+getIndex :: Node -> Index
+getIndex (Node (Step index category headArc depArcs : _) _) = index
+
+#+END_SRC
+
+
+To extract the category of a word from a node :
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+getCategory :: Node -> Category
+getCategory (Node (Step index category headArc depArcs : _) _) = category
+
+#+END_SRC
+
+
+To extract the list of left-head arcs from a node :
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+getHeadArc :: Node -> [Arc]
+getHeadArc (Node (Step index category headArc depArcs : _) _) = headArc
+
+#+END_SRC
+
+
+To extract list of left-dependent arcs from node
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+getDepArcs :: Node -> [Arc]
+getDepArcs (Node (Step index category headArc depArcs : _) _) = depArcs
+
+#+END_SRC
+
+** Extracting Neighbouring Nodes From Node
+
+Finally... the most essential property of a node value is that it 'contains'
+the current state of the tree within it - that is, all the other nodes from the partial parse it
+belongs to can be accessed from it.
+
+To access the immediately preceding and succeeding (left and right neighbour) nodes:
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+leftNeighbour, rightNeighbour :: Node -> [Node]
+leftNeighbour (Node (s : s' : p) q) = [Node (s' : p) (s : q)]
+leftNeighbour _ = []
+rightNeighbour (Node p (s : q)) = [Node (s : p) q]
+rightNeighbour _ = []
+
+#+END_SRC
+
+To access all the predecessors and successors of a node, we compute the closure
+of the left/right neighbours of the node.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+preds, succs :: Node -> [Node]
+preds = clo leftNeighbour
+succs = clo rightNeighbour
+
+#+END_SRC
+
+** Extracting Head And Dependents Of Node
+
+The following functions are helper functions that compute the left and right
+dependents of a node.
+
+The function =leftDepHelper= computes the left dependents of a node by
+selecting elements from the list of predecessors of a node, for which there
+exists a dependency arc with index equal to index of the node. =rightDepHelper=
+similarly computes the list of right dependents from the list of successors of
+the node, whose left head's index is equal to that of the node (Remember here
+that we only store left heads and left dependencies). The functions
+=leftHeadHelper= and =rightHeadHelper= are implemented analogously.
+
+The total list of heads and dependencies of a node is computed by combining the
+lists for left and right heads/dependencies.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+-- argNode : argument Node
+
+leftDepHelper, rightDepHelper, depHelper :: Node ->  [(Role, Node)]
+leftDepHelper argNode = [(role, node) | node <- preds argNode,
+                          (role, index) <- getDepArcs argNode,
+                         (getIndex node) == index]
+rightDepHelper argNode = [(role, node) | node <- succs argNode,
+                          (role, index) <- getHeadArc node,
+                          (getIndex argNode) == index]
+depHelper = leftDepHelper `mappend` rightDepHelper
+
+
+leftHeadHelper, rightHeadHelper, headHelper :: Node -> [(Role, Node)]
+leftHeadHelper argNode = [(role, node) | node <- preds argNode,
+                          (role, index) <- getHeadArc argNode,
+                          (getIndex node) == index]
+rightHeadHelper argNode = [(role, node) | node <- succs argNode,
+                           (role, index) <- getDepArcs node,
+                           (getIndex argNode) == index]
+headHelper = leftHeadHelper `mappend` rightHeadHelper
+
+#+END_SRC
+
+
+* Higher-Level Interface Functions
+
+The functions defined above are not meant to be used directly by
+grammar writers. They form the base ("under the hood", so to speak) of the set
+of basic parser interface functions, that are directly used in the construction
+of a grammar.
+
+** For Computing Related Nodes
+
+The following functions return groups of related nodes, related by
+dependent/head relation.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+
+leftDep, rightDep, dep, leftHead, rightHead, parseHead :: Node -> [Node]
+leftDep   = fmap snd . leftDepHelper
+rightDep  = fmap snd . rightDepHelper
+dep       = fmap snd . depHelper
+leftHead  = fmap snd . leftHeadHelper
+rightHead = fmap snd . rightHeadHelper
+parseHead = fmap snd . headHelper
+
+#+END_SRC
+
+** For Computing Arc Roles
+
+The following is the set of functions for computing roles of in-going and
+out-going arcs.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+leftDepRoles, rightDepRoles, depRoles, leftHeadRoles, rightHeadRoles, headRoles :: Node -> [Role]
+leftDepRoles   = fmap fst . leftDepHelper
+rightDepRoles  = fmap fst . rightDepHelper
+depRoles       = fmap fst . depHelper
+leftHeadRoles  = fmap fst . leftHeadHelper
+rightHeadRoles = fmap fst . rightHeadHelper
+headRoles      = fmap fst . headHelper
+
+
+#+END_SRC
+** For Finding Relations of a Specific Type
+
+The following is the set of functions used to find all dependents of a specific
+type.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+leftDepBy, rightDepBy, depBy :: Role -> Node -> [Node]
+leftDepBy argRole argNode  = [ node | (argRole, node) <- leftDepHelper argNode ]
+rightDepBy argRole argNode = [ node | (argRole, node) <- rightDepHelper argNode]
+depBy argRole = leftDepBy argRole `mappend` rightDepBy argRole
+
+
+leftHeadBy, rightHeadBy, headBy :: Role -> Node -> [Node]
+leftHeadBy argRole argNode  = [ node | (argRole, node) <- leftHeadHelper argNode ] 
+rightHeadBy argRole argNode = [ node | (argRole, node) <- rightHeadHelper argNode]
+headBy argRole = leftHeadBy argRole `mappend` rightHeadBy argRole
+
+#+END_SRC
+
+** Other Useful Functions
+
+The following are functions to compute the leftmost and rightmost nodes.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+leftmost, rightmost :: [Node] -> [Node]
+leftmost [] = []
+leftmost xs = [minimum xs]
+rightmost [] = []
+rightmost xs = [minimum xs]
+
+#+END_SRC
+
+We also write a function for checking whether an argument node has no head
+(assuming the grammar does not allow for forests, this would check for root
+node), and to find the last node of a parse (i.e: the node containing the final
+parse.)
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+headless :: Node -> Bool
+headless = null . parseHead
+
+
+lastNode :: Parse -> Node
+lastNode p = Node p []
+
+#+END_SRC
+
+
+* Parser Core
+
+After defining the data structures and interface functions, we construct the
+core of the parser engine.
+
+First, we define what a word is.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+type ParseWord = String
+
+#+END_SRC
+
+The computation of a parse is carried out by the =step= function, which takes a
+(partial) parse and a word, and computes the next =Step=. This function can be
+decomposed into two independent operations: 
+
+  - =shift= : add a new =Step= with only the word's category and index, and no
+    connections formerd
+  - =connect= : create dependency connections for the new node.
+
+
+** Shift Function
+
+Here, =dic= is a function that's assumed to be provided by the external
+lexicon, that takes a word as input and returns a list of its syntactic
+categories.
+ 
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+shift :: ParseWord -> Parse -> [Parse]
+shift word parse = [ parse << (nextId parse, cat) | cat <- dic word ]
+                   where
+                     nextId [] = 1
+                     nextId (Step index category headArc depArcs : _) = index + 1
+
+#+END_SRC
+
+** Helper Functions for Connect
+
+For the implementation of the =connect= function, we define two helper
+functions :
+
+  - =addHead= : if the current node has no head attached, finds a head for the
+    current node and attaches current node as dependent
+  - =addDep=  : finds potential dependents of the current node, and if they
+    have no head attaches, attaches the current node as their head
+
+For the implementation of the above two functions, we assume a lexicon that
+provides two helper functions =heads= and =deps=, that return a list of
+potential head nodes and potential dependent nodes, respectively.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+addHead, addDep :: Parse -> [Parse]
+addHead parse = [ parse +-> (role, getIndex node) | let currentNode = lastNode parse,
+                                                    headless currentNode,
+                                                    (role, node) <- heads currentNode]
+addDep parse  = [ parse +<-(role, getIndex node) | let currentNode = lastNode parse,
+                                                   (role, node) <- deps currentNode,
+                                                   headless node] 
+
+#+END_SRC 
+** Connect Function
+
+The =connect= function combines parses returns parses returned by =addHead=,
+=addDep=, and the unchanged parse (returned by =pure=) and returns a combined
+list of parses.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+connect :: Parse -> [Parse]
+connect = (addDep >=> connect) `mappend` addHead `mappend` pure
+
+#+END_SRC
+
+** Step function
+
+Now the =step= operation is implemented by combining =shift= and =connect=.
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+step :: ParseWord -> Parse -> [Parse]
+step word = shift word >=> connect
+
+
+#+END_SRC
+** =steps= and =parser= functions
+
+#+BEGIN_SRC haskell :tangle exampleDepParser.hs
+
+steps :: [ParseWord] -> [Parse]
+steps = foldM (flip step) []
+
+parser :: [ParseWord] -> [Parse]
+parser = filter (pass . lastNode) . steps
+
+parse :: String -> [Parse]
+parse sentence = parser (words sentence) 
+#+END_SRC

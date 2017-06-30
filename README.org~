@@ -1,0 +1,15 @@
+#+TITLE: Dependency Parser in Haskell
+
+
+Building a dependency parser in Haskell
+
+
+* To run the parser 
+
+
+#+BEGIN_EXAMPLE
+$ ghci
+
+Prelude> :l exampleDepParser.hs
+    
+#+END_EXAMPLE
